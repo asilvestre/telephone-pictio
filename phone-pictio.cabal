@@ -19,6 +19,9 @@ library
   build-depends:       base >= 4.7 && < 5
                      , servant
                      , servant-server
+                     , servant-blaze
+                     , blaze-markup
+                     , blaze-html
                      , wai
                      , warp
                      , aeson

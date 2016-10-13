@@ -3,6 +3,9 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
+
 
 module Lib
     ( someFunc
@@ -22,6 +25,7 @@ import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import GHC.Generics
 import Servant
+import Servant.HTML.Blaze
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Data.Vector ((!?))
@@ -32,6 +36,9 @@ import qualified Data.Text    as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Vector as V
+import qualified Text.Blaze as B
+import qualified Text.Blaze.Html5 as H
+import qualified Text.Blaze.Html5.Attributes as A
 
 data GameStep = Picture BS.ByteString | Phrase T.Text deriving (Show)
 
@@ -57,41 +64,63 @@ data Game = Game (V.Vector GameStep) deriving (Show)
 instance ToJSON Game where
   toJSON (Game ss) = object ["steps" .= V.toList ss]
 
-newtype IntT u = IntT { runIntT :: Int } deriving (Eq, Show, Ord, Num, Generic, Hashable, FromHttpApiData, Bounded,
-  Integral, Enum, Real)
+newtype IntT u = IntT Int deriving (Eq, Show, Ord, Num, Generic, Hashable, FromHttpApiData, Bounded,
+  Integral, Enum, Real, FromJSON, ToJSON)
 
-instance FromJSON (IntT u) where
-  parseJSON (Number n) = return (fromMaybe 0 $ toBoundedInteger n)
-  parseJSON _ = mzero
-
-instance ToJSON (IntT u) where
-  toJSON (IntT n) = toJSON n
+runIntT :: IntT u -> Int
+runIntT (IntT n) = n
 
 data GameIdT
 type GameId = IntT GameIdT
 
+newtype GameList = GameList [GameId] deriving(Eq, Show, FromJSON, ToJSON)
+
 data StepIdT
 type StepId = IntT StepIdT
 
-data GamePath = GamePath {gameId :: GameId, stepId :: StepId} deriving (Eq, Ord, Show, Generic)
+data StepPath = StepPath {gameId :: GameId, stepId :: StepId} deriving (Eq, Ord, Show, Generic)
 
-instance FromJSON GamePath
-instance ToJSON GamePath
+instance FromJSON StepPath
+instance ToJSON StepPath
 
 type GameDB = HM.HashMap GameId Game
 
+instance B.ToMarkup GameList where
+  toMarkup (GameList gs) = do
+    H.head $ H.title "TelephonePictio - Game List"
+    H.body $ do
+      H.h1 "Game list"
+      H.ol $ forM_ gs (H.li . B.toMarkup)
+      H.a H.! A.href "/game/" $ "create a new one!"
+
+tshow :: Show a => a -> T.Text
+tshow = T.pack . show
+
+instance B.ToMarkup GameId where
+  toMarkup (IntT n) = H.a H.! A.href (B.toValue $ "/game/" <> tshow n) $ (H.toHtml $ "Game " <> tshow n)
+
+instance B.ToMarkup Game where
+  toMarkup (Game ss) = do
+    H.head $ H.title "TelephonePictio - Game"
+    H.body $ do
+      H.h1 "Game"
+      forM_ ss B.toMarkup
+
+instance B.ToMarkup GameStep where
+  toMarkup (Picture d) = H.img H.! A.src (B.toValue $ "data:image/png;base64," <> tshow d)
+  toMarkup (Phrase d) = H.h2 $ H.toHtml d
+
 type PhonePictioAPI =
-  "games" :> Get '[JSON] [GameId]
-  :<|> "game" :> Capture "gameid" GameId :> Get '[JSON] Game
-  :<|> "game" :> ReqBody '[JSON] GameStep :> Post '[JSON] GamePath
-  :<|> "gamestep" :> Capture "gameid" GameId :> Capture "stepid" StepId :> Get '[JSON] GameStep
-  :<|> "gamestep" :> Capture "gameid" GameId :> Capture "stepid" StepId :> ReqBody '[JSON] GameStep :> Post '[JSON] GamePath
+  "games" :> Get '[JSON, HTML] GameList
+  :<|> "game" :> Capture "gameid" GameId :> Get '[JSON, HTML] Game
+  :<|> "game" :> ReqBody '[JSON] GameStep :> Post '[JSON] StepPath
+  :<|> "game" :> Capture "gameid" GameId :> "step" :> Capture "stepid" StepId :> Get '[JSON, HTML] GameStep
+  :<|> "game" :> Capture "gameid" GameId :> "step" :> Capture "stepid" StepId :> ReqBody '[JSON] GameStep :> Post '[JSON] StepPath
 
 someFunc :: IO ()
 someFunc = do
   tvar <- atomically $ newTVar HM.empty
   run 8081 (app tvar)
-
 
 gameAPI :: Proxy PhonePictioAPI
 gameAPI = Proxy
@@ -102,24 +131,24 @@ app tvar = serve gameAPI (server tvar)
 server :: TVar GameDB -> Server PhonePictioAPI
 server st = getGames st :<|> getGame st :<|> postGame st :<|> getGameStep st :<|> postGameStep st
 
-getGames :: TVar GameDB -> Handler [GameId]
+getGames :: TVar GameDB -> Handler GameList
 getGames tvar = do
   db <- liftIO $ atomically $ readTVar tvar
-  return $ HM.keys db
+  return $ GameList (HM.keys db)
 
 getGame :: TVar GameDB -> GameId -> Handler Game
 getGame tvar gid = do
   db <- liftIO $ atomically $ readTVar tvar
   case HM.lookup gid db of
-    Nothing -> throwError err404
+    Nothing -> throwError err404 { errBody = "Game not found" }
     Just g -> return g
 
-postGame :: TVar GameDB -> GameStep -> Handler GamePath
+postGame :: TVar GameDB -> GameStep -> Handler StepPath
 postGame tvar s = liftIO $ atomically $ do
   db <- readTVar tvar
   let newId = IntT $ HM.size db
   writeTVar tvar $ HM.insert newId (Game $ V.singleton s) db
-  return $ GamePath newId 0
+  return $ StepPath newId 0
 
 getGameStep :: TVar GameDB -> GameId -> StepId -> Handler GameStep
 getGameStep tvar gid sid = do
@@ -128,14 +157,14 @@ getGameStep tvar gid sid = do
     Nothing -> throwError err404 { errBody = "Step not found" }
     Just s -> return s
 
-postGameStep :: TVar GameDB -> GameId -> StepId -> GameStep -> Handler GamePath
+postGameStep :: TVar GameDB -> GameId -> StepId -> GameStep -> Handler StepPath
 postGameStep tvar gid sid s = do
   mr <- liftIO $ atomically $ do
     db <- readTVar tvar
     let idx = runIntT sid
     let mg = HM.lookup gid db
     case mg >>= (\(Game ss) -> ss !? idx) of
-      Nothing -> return $ Left "Step not found"
+      Nothing -> return $ Left (err404 { errBody = "Step not found"})
       Just os -> do
         let Just (Game ss) = mg
         let nextStep = IntT $ V.length ss
@@ -143,10 +172,10 @@ postGameStep tvar gid sid s = do
         let nss = rss `V.snoc` s
         if correctStep os s then (do
                             writeTVar tvar $ HM.insert ngid (Game nss) db
-                            return $ Right (GamePath ngid (IntT $ V.length nss)))
-                            else return $ Left "Incompatible step"
+                            return $ Right (StepPath ngid (IntT $ V.length nss)))
+                            else return $ Left (err400 { errBody = "Incompatible step" })
   case mr of
-    Left err -> throwError err404 { errBody = err }
+    Left err -> throwError err
     Right r -> return r
   where
     correctStep (Picture _) (Phrase _) = True
