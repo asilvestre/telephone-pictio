@@ -97,7 +97,7 @@ tshow :: Show a => a -> T.Text
 tshow = T.pack . show
 
 instance B.ToMarkup GameId where
-  toMarkup (IntT n) = H.a H.! A.href (B.toValue $ "/game/" <> tshow n) $ (H.toHtml $ "Game " <> tshow n)
+  toMarkup (IntT n) = H.a H.! A.href (B.toValue $ "/game/" <> tshow n) $ H.toHtml ("Game " <> tshow n)
 
 instance B.ToMarkup Game where
   toMarkup (Game ss) = do
@@ -110,8 +110,10 @@ instance B.ToMarkup GameStep where
   toMarkup (Picture d) = H.img H.! A.src (B.toValue $ "data:image/png;base64," <> tshow d)
   toMarkup (Phrase d) = H.h2 $ H.toHtml d
 
+
 type PhonePictioAPI =
-  "games" :> Get '[JSON, HTML] GameList
+  "static" :> Raw
+  :<|> "games" :> Get '[JSON, HTML] GameList
   :<|> "game" :> Capture "gameid" GameId :> Get '[JSON, HTML] Game
   :<|> "game" :> ReqBody '[JSON] GameStep :> Post '[JSON] StepPath
   :<|> "game" :> Capture "gameid" GameId :> "step" :> Capture "stepid" StepId :> Get '[JSON, HTML] GameStep
@@ -129,7 +131,7 @@ app :: TVar GameDB -> Application
 app tvar = serve gameAPI (server tvar)
 
 server :: TVar GameDB -> Server PhonePictioAPI
-server st = getGames st :<|> getGame st :<|> postGame st :<|> getGameStep st :<|> postGameStep st
+server st = serveDirectory "static-files" :<|> getGames st :<|> getGame st :<|> postGame st :<|> getGameStep st :<|> postGameStep st
 
 getGames :: TVar GameDB -> Handler GameList
 getGames tvar = do
