@@ -34,7 +34,7 @@ library
                      , hashable
                      , vector
                      , scientific
-                     , servant-ede
+                     , ede
   default-language:    Haskell2010
 
 executable phone-pictio-exe
